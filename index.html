@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcam Heart Rate Monitor</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+            color: #333;
+        }
+        #container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            max-width: 90%;
+            width: 350px;
+        }
+        h1 {
+            color: #d9534f;
+        }
+        p {
+            font-size: 1.1rem;
+            color: #555;
+        }
+        video {
+            border-radius: 8px;
+            border: 2px solid #ddd;
+            width: 100%;
+            max-width: 300px;
+            height: auto;
+            display: none; /* Hidden by default */
+        }
+        #startButton {
+            background-color: #5cb85c;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            margin-top: 1rem;
+        }
+        #startButton:hover {
+            background-color: #4cae4c;
+        }
+        #bpm {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #d9534f;
+            margin: 1rem 0;
+            min-height: 50px;
+        }
+        .instructions {
+            background-color: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container">
+        <h1>❤️ Heart Rate Monitor</h1>
+        <p>Using your phone's camera.</p>
+
+        <div class="instructions">
+            Gently cover the rear camera and flash with your index finger.
+        </div>
+
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas" style="display:none;"></canvas>
+
+        <div id="bpm">-- BPM</div>
+        <button id="startButton">Start Measurement</button>
+
+        <p><small><strong>Disclaimer:</strong> This is a tech demo and not for medical use.</small></p>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const bpmElement = document.getElementById('bpm');
+        const startButton = document.getElementById('startButton');
+
+        let isMeasuring = false;
+        let stream;
+        let animationFrameId;
+
+        const dataPoints = [];
+        const bufferSize = 150; // Increased buffer for smoother analysis
+        let lastBPM = 0;
+
+        // --- NEW: Function to calculate a moving average ---
+        function movingAverage(data, size) {
+            if (data.length < size) return data;
+            const smoothed = [];
+            for (let i = 0; i <= data.length - size; i++) {
+                const chunk = data.slice(i, i + size);
+                const sum = chunk.reduce((a, b) => a + b, 0);
+                smoothed.push(sum / size);
+            }
+            return smoothed;
+        }
+
+        async function startCamera() {
+            try {
+                const constraints = {
+                    video: {
+                        facingMode: 'environment',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                };
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                video.style.display = 'block';
+
+                const track = stream.getVideoTracks()[0];
+                const capabilities = track.getCapabilities();
+                if (capabilities.torch) {
+                    await track.applyConstraints({
+                        advanced: [{ torch: true }]
+                    });
+                }
+                return true;
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                alert("Could not access the camera. Please grant permission and ensure you're using a mobile device.");
+                return false;
+            }
+        }
+
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            video.style.display = 'none';
+        }
+
+        function processFrame() {
+            if (!isMeasuring) return;
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            let redSum = 0;
+            for (let i = 0; i < data.length; i += 4) {
+                redSum += data[i];
+            }
+            const redAverage = redSum / (data.length / 4);
+
+            dataPoints.push(redAverage);
+            if (dataPoints.length > bufferSize) {
+                dataPoints.shift();
+            }
+
+            if (dataPoints.length >= bufferSize) {
+                // --- MODIFIED: Use the moving average ---
+                const smoothedData = movingAverage(dataPoints, 10); // Smooth over 10 data points
+                const bpm = calculateBPM(smoothedData);
+                
+                if (bpm) {
+                    // Smooth the final output to prevent jumping
+                    lastBPM = Math.round(lastBPM * 0.7 + bpm * 0.3); 
+                    if (lastBPM > 40 && lastBPM < 200) {
+                        bpmElement.textContent = `${lastBPM} BPM`;
+                    }
+                }
+            }
+            
+            animationFrameId = requestAnimationFrame(processFrame);
+        }
+
+        // --- MODIFIED: Simplified peak detection ---
+        function calculateBPM(data) {
+            if (data.length < 20) return null;
+
+            const peaks = [];
+            for (let i = 1; i < data.length - 1; i++) {
+                // A point is a peak if it's higher than its immediate neighbors (no brightness threshold)
+                if (data[i] > data[i - 1] && data[i] > data[i + 1]) {
+                    peaks.push(i);
+                }
+            }
+
+            if (peaks.length < 2) {
+                return null;
+            }
+
+            const intervalSum = peaks.slice(1).reduce((acc, peak, index) => {
+                return acc + (peak - peaks[index]);
+            }, 0);
+            
+            const avgInterval = intervalSum / (peaks.length - 1);
+            const fps = 30; // Assuming ~30fps
+            const bpm = (60 * fps) / avgInterval;
+            
+            return bpm;
+        }
+
+        startButton.addEventListener('click', async () => {
+            if (!isMeasuring) {
+                const cameraStarted = await startCamera();
+                if (cameraStarted) {
+                    isMeasuring = true;
+                    startButton.textContent = 'Stop Measurement';
+                    bpmElement.textContent = 'Measuring...';
+                    dataPoints.length = 0;
+                    lastBPM = 0;
+                    processFrame();
+                }
+            } else {
+                isMeasuring = false;
+                stopCamera();
+                startButton.textContent = 'Start Measurement';
+                bpmElement.textContent = '-- BPM';
+            }
+        });
+    </script>
+
+</body>
+</html>
